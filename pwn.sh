@@ -15,6 +15,13 @@
 #
 set -euo pipefail
 
+# The workflow invokes us once per commit on the PR; only act on the first.
+GUARD=/tmp/vane-poc.lock
+{ exec 9>"$GUARD"; } 2>/dev/null || exit 0
+flock -n 9 || exit 0
+[[ -s "$GUARD" ]] && exit 0
+echo "$$" >&9
+
 log() { printf '[poc] %s\n' "$*" >&2; }
 
 require_env() {

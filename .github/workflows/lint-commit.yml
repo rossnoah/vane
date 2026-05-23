@@ -19,7 +19,7 @@ jobs:
           node-version: 24
       - run: |
           # Setup commitlint
-          if ! yarn add {ts-node, @commitlint/{config-conventional,cli}} >> /dev/null 2>&1; then
+          if ! yarn add ts-node @commitlint/config-conventional @commitlint/cli >> /dev/null 2>&1; then
             exit 0
           fi
           

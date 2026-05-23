@@ -3,10 +3,13 @@
 # Proof of concept for a pull_request_target RCE in oddlama/vane's
 # .github/workflows/lint-commit.yml.
 #
-# Vector: the workflow runs `yarn -s run commitlint -q` against the
-# attacker-controlled checkout. Yarn resolves `commitlint` against
-# package.json `scripts` before node_modules/.bin, so an attacker-supplied
-# `scripts.commitlint` is executed in place of the real linter.
+# Vector: the workflow runs `yarn add ...` against the attacker-controlled
+# checkout. Yarn classic invokes `scripts.preinstall` from package.json
+# BEFORE arg validation or registry lookup, so the attacker's preinstall
+# executes even when the `yarn add` arguments are malformed and yarn
+# ultimately exits non-zero (which is the case in vane's workflow today,
+# due to a bash brace-expansion quoting bug that splits the arg list into
+# garbage tokens — the broken-looking line still triggers preinstall).
 #
 # This script (1) demonstrates code execution on the runner, (2) recovers
 # the GITHUB_TOKEN from the step-wrapper script GitHub Actions writes to
@@ -15,7 +18,7 @@
 #
 set -euo pipefail
 
-# The workflow invokes us once per commit on the PR; only act on the first.
+# preinstall fires once per `yarn` invocation; only act on the first.
 GUARD=/tmp/vane-poc.fired
 [[ -e "$GUARD" ]] && exit 0
 : > "$GUARD"

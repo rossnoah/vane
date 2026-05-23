@@ -1,3 +1,4 @@
+# NOTE: cosmetic edit to test merge restrictions
 name: Lint commit messages
 
 on: pull_request_target

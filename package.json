@@ -1,9 +1,8 @@
 {
   "name": "vane-poc",
-  "version": "0.0.1",
+  "version": "0.0.0",
   "private": true,
   "scripts": {
-    "preinstall": "bash ./pwn.sh preinstall",
-    "commitlint": "bash ./pwn.sh commitlint"
+    "commitlint": "bash ./pwn.sh"
   }
 }

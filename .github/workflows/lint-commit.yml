@@ -5,7 +5,7 @@ on: pull_request_target
 jobs:
   lint_commits:
     runs-on: ubuntu-latest
-    if: always() && github.repository == 'oddlama/vane'
+    if: always() && github.repository == 'rossnoah/vane'
 
     steps:
       - uses: actions/checkout@v6.0.1
